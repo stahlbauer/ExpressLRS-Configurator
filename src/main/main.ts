@@ -195,6 +195,12 @@ const createWindow = async () => {
 
   const port = await startApiServerOnce();
 
+  // macOS can send a reopen while the first call waits for the API server.
+  // The call that resumes first creates the window, and the other one stops here.
+  if (mainWindow !== null) {
+    return;
+  }
+
   mainWindow = new BrowserWindow({
     show: false,
     width: 1400,
