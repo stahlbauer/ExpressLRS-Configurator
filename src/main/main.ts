@@ -170,6 +170,7 @@ if (app.commandLine.hasSwitch('disable-gpu')) {
 
 let mainWindow: BrowserWindow | null = null;
 let updater: Updater | null = null;
+let apiServerPort: Promise<number> | null = null;
 const localServer: ApiServer = new ApiServer();
 // Per-launch secret shared only with our renderer, see ApiServer.start.
 // Development builds can pin it with API_AUTH_TOKEN, e.g. for `npm run gql-codegen`.
@@ -192,6 +193,96 @@ const createWindow = async () => {
     return path.join(RESOURCES_PATH, ...paths);
   };
 
+  const port = await startApiServerOnce();
+
+  mainWindow = new BrowserWindow({
+    show: false,
+    width: 1400,
+    height: 920,
+    icon: getAssetPath('icon.png'),
+    // TODO: improve electron.js security
+    webPreferences: {
+      // nodeIntegration: true,
+      // sandbox: false,
+      // contextIsolation: false,
+      preload: app.isPackaged
+        ? path.join(__dirname, 'preload.js')
+        : path.join(__dirname, '../../.erb/dll/preload.js'),
+    },
+  });
+  mainWindow.on('close', (e) => {
+    if (buildInProgress) {
+      const choice = dialog.showMessageBoxSync(mainWindow!, {
+        type: 'question',
+        buttons: ['Yes', 'No'],
+        title: 'Are you sure you want to quit?',
+        message: 'It looks like you have a build in progress',
+      });
+      if (choice === 1) {
+        e.preventDefault();
+      }
+    }
+  });
+
+  const baseUrl = `http://${ApiServer.host}:${port}`;
+  const apiUrl = `${baseUrl}/graphql`;
+  const subscriptionsUrl = `ws://${ApiServer.host}:${port}/graphql`;
+  mainWindow.loadURL(
+    resolveHtmlPath(
+      'index.html',
+      `base_url=${baseUrl}&api_url=${apiUrl}&subscriptions_url=${subscriptionsUrl}`,
+    ),
+  );
+
+  // TODO: Use 'ready-to-show' event
+  //        https://github.com/electron/electron/blob/master/docs/api/browser-window.md#using-ready-to-show-event
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (!mainWindow) {
+      throw new Error('"mainWindow" is not defined');
+    }
+
+    if (process.env.START_MINIMIZED) {
+      mainWindow.minimize();
+    } else {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+
+    // set the window title based on package.json
+    const windowTitle = require('../../release/app/package.json').productName;
+    mainWindow.setTitle(windowTitle);
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
+  // mainWindow.setMenuBarVisibility(false);
+  const menuBuilder = new MenuBuilder(mainWindow);
+  menuBuilder.buildMenu();
+
+  // Open urls in the user's browser
+  mainWindow.webContents.setWindowOpenHandler((edata) => {
+    shell.openExternal(edata.url);
+    return { action: 'deny' };
+  });
+
+  updater = new Updater(logger, mainWindow, baseUrl);
+};
+
+/*
+  Starts the API server on the first call and resolves to its port. Every later call resolves
+  to the same port, so a window created again on macOS reuses the running server.
+  Never start a second server in this process: type-graphql keeps resolver metadata in a
+  global store, and each buildSchema call registers the resolver parameters again. Every
+  resolver of every server then receives each argument twice and binds the wrong values.
+ */
+const startApiServerOnce = (): Promise<number> => {
+  apiServerPort ??= startApiServer();
+  return apiServerPort;
+};
+
+const startApiServer = async (): Promise<number> => {
   logger.log('trying to get port');
   const port = await ApiServer.getPort(3500);
   logger.log(`received unused port`, { port });
@@ -368,80 +459,9 @@ const createWindow = async () => {
   );
   logger.log('server started');
 
-  mainWindow = new BrowserWindow({
-    show: false,
-    width: 1400,
-    height: 920,
-    icon: getAssetPath('icon.png'),
-    // TODO: improve electron.js security
-    webPreferences: {
-      // nodeIntegration: true,
-      // sandbox: false,
-      // contextIsolation: false,
-      preload: app.isPackaged
-        ? path.join(__dirname, 'preload.js')
-        : path.join(__dirname, '../../.erb/dll/preload.js'),
-    },
-  });
-  mainWindow.on('close', (e) => {
-    if (buildInProgress) {
-      const choice = dialog.showMessageBoxSync(mainWindow!, {
-        type: 'question',
-        buttons: ['Yes', 'No'],
-        title: 'Are you sure you want to quit?',
-        message: 'It looks like you have a build in progress',
-      });
-      if (choice === 1) {
-        e.preventDefault();
-      }
-    }
-  });
-
-  const baseUrl = `http://${ApiServer.host}:${port}`;
-  const apiUrl = `${baseUrl}/graphql`;
-  const subscriptionsUrl = `ws://${ApiServer.host}:${port}/graphql`;
-  mainWindow.loadURL(
-    resolveHtmlPath(
-      'index.html',
-      `base_url=${baseUrl}&api_url=${apiUrl}&subscriptions_url=${subscriptionsUrl}`,
-    ),
-  );
-
-  // TODO: Use 'ready-to-show' event
-  //        https://github.com/electron/electron/blob/master/docs/api/browser-window.md#using-ready-to-show-event
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (!mainWindow) {
-      throw new Error('"mainWindow" is not defined');
-    }
-
-    if (process.env.START_MINIMIZED) {
-      mainWindow.minimize();
-    } else {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-
-    // set the window title based on package.json
-    const windowTitle = require('../../release/app/package.json').productName;
-    mainWindow.setTitle(windowTitle);
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // mainWindow.setMenuBarVisibility(false);
-  const menuBuilder = new MenuBuilder(mainWindow);
-  menuBuilder.buildMenu();
-
-  // Open urls in the user's browser
-  mainWindow.webContents.setWindowOpenHandler((edata) => {
-    shell.openExternal(edata.url);
-    return { action: 'deny' };
-  });
-
-  updater = new Updater(logger, mainWindow, baseUrl);
+  return port;
 };
+
 /**
  * Add event listeners...
  */
